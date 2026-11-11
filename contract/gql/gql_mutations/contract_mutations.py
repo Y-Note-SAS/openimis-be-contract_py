@@ -15,6 +15,28 @@ from contract.exceptions import CeleryWorkerError
 from kombu.exceptions import OperationalError
 
 
+def _bulk_failure(cls, exc):
+    return [{'message': "Failed to process {} mutation".format(cls._mutation_class), 'detail': str(exc)}]
+
+
+def _scoped_contract_ids(user, data):
+    """
+    The contracts a bulk mutation acts on, within the user's scope: the uuids given or
+    those the extended filters selected (from Contract.objects) are narrowed by
+    Contract.get_queryset; a contract out of scope is left out.
+    """
+    if "uuids" in data:
+        ids = list(data["uuids"].values_list("id", flat=True)) \
+            if hasattr(data["uuids"], "values_list") else list(data["uuids"])
+    else:
+        ids = list(data.get("contract_uuids") or [])
+    if not ids:
+        return []
+    allowed = {str(contract_id) for contract_id in
+               Contract.get_queryset(Contract.objects.filter(id__in=ids), user).values_list("id", flat=True)}
+    return [contract_id for contract_id in ids if str(contract_id) in allowed]
+
+
 class CreateContractMutation(ContractCreateMutationMixin, BaseMutation):
     _mutation_class = "CreateContractMutation"
     _mutation_module = "contract"
@@ -68,6 +90,11 @@ class ApproveContractBulkMutation(ContractApproveMutationMixin, BaseMutation):
     @classmethod
     @mutation_on_uuids_from_filter_business_model(Contract, ContractGQLType, 'extended_filters', {})
     def async_mutate(cls, user, **data):
+        # the override skipped BaseMutation.async_mutate, hence the rights check
+        try:
+            cls._validate_mutation(user, **data)
+        except Exception as exc:
+            return _bulk_failure(cls, exc)
         error_message = None
         if "client_mutation_id" in data:
             data.pop('client_mutation_id')
@@ -88,13 +115,7 @@ class ApproveContractBulkMutation(ContractApproveMutationMixin, BaseMutation):
                 F"Celery connection has failed. Error: {e} \n Please, contact your system administrator.")
     @classmethod
     def approve_contracts(cls, user, contracts):
-
-        if "uuids" in contracts:
-            contracts["uuids"] = list(contracts["uuids"].values_list("id", flat=True))
-            return approve_contracts(user_id=f'{user.id}', contracts=contracts["uuids"])
-        else:
-            if "contract_uuids" in contracts:
-                return approve_contracts(user_id=f'{user.id}', contracts=contracts["contract_uuids"])
+        return approve_contracts(user_id=f'{user.id}', contracts=_scoped_contract_ids(user, contracts))
 
     class Input(ContractApproveBulkInputType):
         pass
@@ -117,6 +138,11 @@ class ContractCreateInvoiceBulkMutation(ContractCreateInvoiceMutationMixin, Base
     @classmethod
     @mutation_on_uuids_from_filter_business_model(Contract, ContractGQLType, 'extended_filters', {})
     def async_mutate(cls, user, **data):
+        # the override skipped BaseMutation.async_mutate: the invoice right was never checked
+        try:
+            cls._validate_mutation(user, **data)
+        except Exception as exc:
+            return _bulk_failure(cls, exc)
         if "client_mutation_id" in data:
             data.pop('client_mutation_id')
         if "client_mutation_label" in data:
@@ -127,12 +153,7 @@ class ContractCreateInvoiceBulkMutation(ContractCreateInvoiceMutationMixin, Base
 
     @classmethod
     def create_contract_invoice(cls, user, contracts):
-        if "uuids" in contracts:
-            contracts["uuids"] = list(contracts["uuids"].values_list("id", flat=True))
-            return create_invoice_from_contracts(user_id=f'{user.id}', contracts=contracts["uuids"])
-        else:
-            if "contract_uuids" in contracts:
-                return create_invoice_from_contracts(user_id=f'{user.id}', contracts=contracts["contract_uuids"])
+        return create_invoice_from_contracts(user_id=f'{user.id}', contracts=_scoped_contract_ids(user, contracts))
 
     class Input(ContractCreateInvoiceBulkInputType):
         pass
@@ -146,6 +167,11 @@ class CounterContractBulkMutation(ContractCounterMutationMixin, BaseMutation):
     @classmethod
     @mutation_on_uuids_from_filter_business_model(Contract, ContractGQLType, 'extended_filters', {})
     def async_mutate(cls, user, **data):
+        # the override skipped BaseMutation.async_mutate, hence the rights check
+        try:
+            cls._validate_mutation(user, **data)
+        except Exception as exc:
+            return _bulk_failure(cls, exc)
         if "client_mutation_id" in data:
             data.pop('client_mutation_id')
         if "client_mutation_label" in data:
@@ -156,12 +182,7 @@ class CounterContractBulkMutation(ContractCounterMutationMixin, BaseMutation):
 
     @classmethod
     def counter_contracts(cls, user, contracts):
-        if "uuids" in contracts:
-            contracts["uuids"] = list(contracts["uuids"].values_list("id", flat=True))
-            return counter_contracts(user_id=f'{user.id}', contracts=contracts["uuids"])
-        else:
-            if "contract_uuids" in contracts:
-                return counter_contracts(user_id=f'{user.id}', contracts=contracts["contract_uuids"])
+        return counter_contracts(user_id=f'{user.id}', contracts=_scoped_contract_ids(user, contracts))
 
     class Input(ContractCounterBulkInputType):
         pass

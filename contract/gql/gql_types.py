@@ -1,6 +1,7 @@
 import graphene
 from core import prefix_filterset, ExtendedConnection
 from graphene_django import DjangoObjectType
+from core.gql.scoped_object_type import ScopedQuerysetMixin
 from contract.models import Contract, ContractDetails, ContractContributionPlanDetails, \
     ContractMutation, ContractDetailsMutation
 from insuree.schema import InsureeGQLType
@@ -9,7 +10,7 @@ from contribution.gql_queries import PremiumGQLType
 from policyholder.gql.gql_types import PolicyHolderGQLType
 
 
-class ContractGQLType(DjangoObjectType):
+class ContractGQLType(ScopedQuerysetMixin, DjangoObjectType):
 
     class Meta:
         model = Contract
@@ -33,14 +34,10 @@ class ContractGQLType(DjangoObjectType):
 
         connection_class = ExtendedConnection
 
-        @classmethod
-        def get_queryset(cls, queryset, info):
-            return Contract.get_queryset(queryset, info)
-
     amount = graphene.Float()
 
 
-class ContractDetailsGQLType(DjangoObjectType):
+class ContractDetailsGQLType(ScopedQuerysetMixin, DjangoObjectType):
 
     class Meta:
         model = ContractDetails
@@ -58,12 +55,8 @@ class ContractDetailsGQLType(DjangoObjectType):
 
         connection_class = ExtendedConnection
 
-        @classmethod
-        def get_queryset(cls, queryset, info):
-            return ContractDetails.get_queryset(queryset, info)
 
-
-class ContractContributionPlanDetailsGQLType(DjangoObjectType):
+class ContractContributionPlanDetailsGQLType(ScopedQuerysetMixin, DjangoObjectType):
 
     class Meta:
         model = ContractContributionPlanDetails
@@ -80,10 +73,6 @@ class ContractContributionPlanDetailsGQLType(DjangoObjectType):
         }
 
         connection_class = ExtendedConnection
-
-        @classmethod
-        def get_queryset(clscls, queryset, info):
-            return ContractContributionPlanDetails.get_queryset(queryset, info)
 
 
 class ContractMutationGQLType(DjangoObjectType):

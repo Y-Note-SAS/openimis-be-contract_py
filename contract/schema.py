@@ -5,7 +5,8 @@ from django.db.models import Q
 from .services import check_unique_code
 from core.gql_queries import ValidationMessageGQLType
 from core.schema import signal_mutation_module_before_mutating, OrderedDjangoFilterConnectionField
-from core.utils import append_validity_filter
+from core.gql import legacy_row_filters
+from core.models import Validity
 from contract.models import Contract, ContractDetails, \
     ContractContributionPlanDetails, ContractMutation
 from contract.gql.gql_types import ContractGQLType, ContractDetailsGQLType, \
@@ -70,7 +71,10 @@ class Query(graphene.ObjectType):
             if not info.context.user.has_perms(ContractConfig.gql_query_contract_policyholder_portal_perms):
                 raise PermissionError("Unauthorized")
 
-        filters = append_validity_filter(**kwargs)
+        # rows narrowed to the policy holders in scope by Contract.get_queryset
+        # (ContractGQLType), which also applies the validity (OP-2029)
+        filters = []
+        _legacy_validity(info, kwargs)
         client_mutation_id = kwargs.get("client_mutation_id", None)
         if client_mutation_id:
             filters.append(Q(mutations__mutation__client_mutation_id=client_mutation_id))
@@ -121,6 +125,18 @@ class Query(graphene.ObjectType):
         return gql_optimizer.query(query.all(), info)
 
 
+def _legacy_validity(info, kwargs):
+    """
+    The validity is applied by Contract.get_queryset (OP-2029); the legacy arguments
+    keep their meaning: dateValidFrom__Gte / dateValidTo__Lte a business validity range,
+    applyDefaultValidityFilter the rows valid now, nothing at all every row.
+    """
+    if kwargs.get('dateValidFrom__Gte') or kwargs.get('dateValidTo__Lte'):
+        return legacy_row_filters(info, kwargs)
+    validity = Validity.NOW if kwargs.get('applyDefaultValidityFilter') else Validity.ALL
+    return legacy_row_filters(info, kwargs, validity=validity)
+
+
 class Mutation(graphene.ObjectType):
     create_contract = CreateContractMutation.Field()
     update_contract = UpdateContractMutation.Field()
@@ -147,7 +163,8 @@ def on_contract_mutation(sender, **kwargs):
         uuids = [uuid] if uuid else []
     if not uuids:
         return []
-    impacted_contracts = Contract.objects.filter(id__in=uuids).all()
+    # only the contracts the user may see get the mutation linked
+    impacted_contracts = Contract.get_queryset(Contract.objects.filter(id__in=uuids), kwargs.get('user'))
     for contract in impacted_contracts:
         ContractMutation.objects.update_or_create(contract=contract, mutation_id=kwargs['mutation_log_id'])
     return []
