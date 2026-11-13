@@ -38,6 +38,11 @@ class ContractQueryTest(TestCase):
             contract_details=cls.test_contract_details
         )
 
+        # the rows are scoped by Contract.get_queryset (policy holder in the user's
+        # scope): query as an administrator, a mock user is not one
+        from core.test_helpers import create_test_interactive_user
+        cls.BaseTestContext.user = create_test_interactive_user(username='ContractQueryAdmin')
+
         cls.schema = Schema(
             query=contract_schema.Query,
         )

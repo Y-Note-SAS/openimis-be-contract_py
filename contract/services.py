@@ -24,7 +24,7 @@ from contract.models import (
 )
 from calculation.services import run_calculation_rules
 
-from policyholder.models import PolicyHolderInsuree
+from policyholder.models import PolicyHolder, PolicyHolderInsuree
 from contribution.models import Premium
 from contribution_plan.models import ContributionPlanBundleDetails, ContributionPlan
 
@@ -66,10 +66,49 @@ def check_authentication(function):
     return wrapper
 
 
+# Set by the contract workflow (submit / approve / counter / amend / payment), never by
+# the client: a create or update ignores them (mass assignment).
+CONTRACT_WORKFLOW_FIELDS = (
+    "amount_notified", "amount_rectified", "amount_due", "date_approved", "amendment", "state",
+    "is_deleted", "version", "replacement_uuid", "user_created", "user_updated",
+    "date_created", "date_updated",
+)
+
+
+def _drop_workflow_fields(contract_input):
+    return {key: value for key, value in contract_input.items() if key not in CONTRACT_WORKFLOW_FIELDS}
+
+
+def scoped_contract(user, contract_id):
+    """The contract `contract_id` if `user` may see it (Contract.get_queryset), else None."""
+    if not contract_id:
+        return None
+    return ContractModel.get_queryset(ContractModel.objects.filter(id=f"{contract_id}"), user).first()
+
+
+def check_policy_holder_in_scope(user, policy_holder_id):
+    """A contract may only be given a current policy holder its author may see."""
+    if not policy_holder_id:
+        return None
+    policy_holder = PolicyHolder.get_queryset(
+        PolicyHolder.objects.filter(id=f"{policy_holder_id}", is_deleted=False), user
+    ).first()
+    if policy_holder is None:
+        raise ContractUpdateError(f"Policy holder {policy_holder_id} not found")
+    return policy_holder
+
+
 class Contract(object):
 
     def __init__(self, user):
         self.user = user
+
+    def _target(self, contract_id):
+        """The contract a write acts on: looked up within the user's scope only."""
+        contract = scoped_contract(self.user, contract_id)
+        if contract is None:
+            raise ContractUpdateError(f"Contract {contract_id} not found")
+        return contract
 
     @check_authentication
     def create(self, contract):
@@ -83,6 +122,9 @@ class Contract(object):
                 ContractConfig.gql_mutation_create_contract_perms
             ):
                 raise PermissionError("Unauthorized")
+            contract = _drop_workflow_fields(contract)
+            contract.pop("id", None)
+            check_policy_holder_in_scope(self.user, contract.get("policy_holder_id"))
             c = ContractModel(**contract)
             c.state = ContractModel.STATE_DRAFT
             c.save(username=self.user.username)
@@ -150,7 +192,11 @@ class Contract(object):
                 )
             ):
                 raise PermissionError("Unauthorized")
-            updated_contract = ContractModel.objects.filter(id=contract["id"]).first()
+            updated_contract = self._target(contract["id"])
+            contract = _drop_workflow_fields(contract)
+            if contract.get("policy_holder_id") and \
+                    f"{contract['policy_holder_id']}" != f"{updated_contract.policy_holder_id}":
+                check_policy_holder_in_scope(self.user, contract["policy_holder_id"])
             # updatable scenario
             if self.__check_rights_by_status(updated_contract.state) == "updatable":
                 if "code" in contract:
@@ -232,7 +278,7 @@ class Contract(object):
                 raise PermissionError("Unauthorized")
 
             contract_id = f"{contract['id']}"
-            contract_to_submit = ContractModel.objects.filter(id=contract_id).first()
+            contract_to_submit = self._target(contract_id)
             contract_details_list = {}
             contract_details_list["data"] = self.__gather_policy_holder_insuree(
                 self.__validate_submission(contract_to_submit=contract_to_submit),
@@ -313,7 +359,7 @@ class Contract(object):
             ):
                 raise PermissionError("Unauthorized")
             contract_id = f"{contract['id']}"
-            contract_to_approve = ContractModel.objects.filter(id=contract_id).first()
+            contract_to_approve = self._target(contract_id)
             # variable to check if we have right to approve
             state_right = self.__check_rights_by_status(contract_to_approve.state)
             # check if we can submit
@@ -365,7 +411,7 @@ class Contract(object):
             ):
                 raise PermissionError("Unauthorized")
             contract_id = f"{contract['id']}"
-            contract_to_counter = ContractModel.objects.filter(id=contract_id).first()
+            contract_to_counter = self._target(contract_id)
             # variable to check if we have right to approve
             state_right = self.__check_rights_by_status(contract_to_counter.state)
             # check if we can submit
@@ -403,7 +449,7 @@ class Contract(object):
             ):
                 raise PermissionError("Unauthorized")
             contract_id = f"{contract['id']}"
-            contract_to_amend = ContractModel.objects.filter(id=contract_id).first()
+            contract_to_amend = self._target(contract_id)
             # variable to check if we have right to amend contract
             state_right = self.__check_rights_by_status(contract_to_amend.state)
             # check if we can amend
@@ -423,6 +469,8 @@ class Contract(object):
             contract_to_amend.date_valid_to = datetime.datetime.now()
             # update contract - also copy contract details etc
             contract.pop("id")
+            # the amounts / approval date are set by the workflow, not the client
+            contract = _drop_workflow_fields(contract)
             [setattr(amended_contract, key, contract[key]) for key in contract]
             # check if chosen fields are not edited
             if any(
@@ -496,7 +544,7 @@ class Contract(object):
                 raise PermissionError("Unauthorized")
             from core import datetime, datetimedelta
 
-            contract_to_renew = ContractModel.objects.filter(id=contract["id"]).first()
+            contract_to_renew = self._target(contract["id"])
             contract_id = contract["id"]
             # block renewing contract not in Updateable or Approvable state
             state_right = self.__check_rights_by_status(contract_to_renew.state)
@@ -562,7 +610,7 @@ class Contract(object):
                 ContractConfig.gql_mutation_delete_contract_perms
             ):
                 raise PermissionError("Unauthorized")
-            contract_to_delete = ContractModel.objects.filter(id=contract["id"]).first()
+            contract_to_delete = self._target(contract["id"])
             # block deleting contract not in Updateable or Approvable state
             if (
                 self.__check_rights_by_status(contract_to_delete.state)
@@ -723,14 +771,21 @@ class ContractDetails(object):
     @check_authentication
     def ph_insuree_to_contract_details(self, contract, ph_insuree):
         try:
-            phi = PolicyHolderInsuree.objects.get(id=f'{ph_insuree["id"]}')
             # check for update contract right perms/authorites
             if not self.user.has_perms(
                 ContractConfig.gql_mutation_update_contract_perms
             ):
                 raise PermissionError("Unauthorized")
+            updated_contract = scoped_contract(self.user, contract["id"])
+            if updated_contract is None:
+                raise ContractUpdateError(f"Contract {contract['id']} not found")
+            phi = PolicyHolderInsuree.objects.filter(id=f'{ph_insuree["id"]}').first()
+            # the insuree must be one of the contract's policy holder
+            if phi is None or updated_contract.policy_holder_id is None \
+                    or phi.policy_holder_id != updated_contract.policy_holder_id:
+                raise ContractUpdateError(
+                    f"Policy holder insuree {ph_insuree['id']} not found for the policy holder of the contract")
             if phi.is_deleted is False and phi.contribution_plan_bundle:
-                updated_contract = ContractModel.objects.get(id=f'{contract["id"]}')
                 if updated_contract.state not in [
                     ContractModel.STATE_DRAFT,
                     ContractModel.STATE_REQUEST_FOR_INFORMATION,

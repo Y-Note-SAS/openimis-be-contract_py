@@ -309,7 +309,7 @@ class ContractCreateInvoiceMutationMixin:
 
     @classmethod
     def create_contract_invoice(cls, user, data):
-        queryset = Contract.objects.filter(id=data['id'])
+        queryset = Contract.get_queryset(Contract.objects.filter(id=data['id']), user)
         if queryset.count() == 1:
             contract = queryset.first()
             contract_to_invoice_service = ContractToInvoiceService(user=user)

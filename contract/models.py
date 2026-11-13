@@ -4,7 +4,6 @@ from contribution_plan.models import ContributionPlanBundle, ContributionPlan
 from django.conf import settings
 from django.db import models
 from core import models as core_models, fields
-from graphql import ResolveInfo
 from policy.models import Policy
 from contribution.models import Premium
 from policyholder.models import PolicyHolder
@@ -49,15 +48,25 @@ class Contract(core_models.HistoryBusinessModel):
         return amount
 
     @classmethod
-    def get_queryset(cls, queryset, user):
-        queryset = cls.filter_queryset(queryset)
-        if isinstance(user, ResolveInfo):
-            user = user.context.user
-        if settings.ROW_SECURITY and user.is_anonymous:
-            return queryset.filter(id=-1)
-        if settings.ROW_SECURITY:
-            pass
-        return queryset
+    def get_queryset(cls, queryset, user=None, *, validity=None, audits=None):
+        """
+        The contracts `user` may see: those of the policy holders they may see
+        (PolicyHolder.get_queryset: their districts, or the policy holders a portal
+        user is linked to). A contract without policy holder (a draft) is seen by the
+        holders of the module's global query right only. Validity / audits on request
+        (OP-2029), every row otherwise (the resolvers state the legacy default).
+        The details and their contribution plan details follow through ParentScope.
+        """
+        queryset = cls.apply_row_filters(queryset, validity, audits, default=cls.filter_queryset)
+        user = cls.scoping_user(user)
+        if user is None or getattr(user, "is_anonymous", True):
+            return cls.no_rows(queryset) if settings.ROW_SECURITY else queryset
+        visible_policy_holders = PolicyHolder.get_queryset(PolicyHolder.objects.all(), user).values("id")
+        condition = models.Q(policy_holder__in=visible_policy_holders)
+        from contract.apps import ContractConfig
+        if getattr(user, "is_imis_admin", False) or user.has_perms(ContractConfig.gql_query_contract_perms):
+            condition |= models.Q(policy_holder__isnull=True)
+        return queryset.filter(condition)
 
     class Meta:
         db_table = 'tblContract'
@@ -85,6 +94,9 @@ class ContractDetailsManager(models.Manager):
 
 
 class ContractDetails(core_models.HistoryModel):
+    # seen by whoever sees its contract (Contract.get_queryset)
+    row_scope = core_models.ParentScope("contract")
+
     contract = models.ForeignKey(Contract, db_column="ContractUUID",
                                       on_delete=models.deletion.CASCADE)
     insuree = models.ForeignKey(Insuree, db_column='InsureeID',
@@ -96,17 +108,6 @@ class ContractDetails(core_models.HistoryModel):
     json_param = models.JSONField(db_column='Json_param', blank=True, null=True)
 
     objects = ContractDetailsManager()
-
-    @classmethod
-    def get_queryset(cls, queryset, user):
-        queryset = cls.filter_queryset(queryset)
-        if isinstance(user, ResolveInfo):
-            user = user.context.user
-        if settings.ROW_SECURITY and user.is_anonymous:
-            return queryset.filter(id=-1)
-        if settings.ROW_SECURITY:
-            pass
-        return queryset
 
     class Meta:
         db_table = 'tblContractDetails'
@@ -122,6 +123,9 @@ class ContractContributionPlanDetailsManager(models.Manager):
 
 
 class ContractContributionPlanDetails(core_models.HistoryBusinessModel):
+    # seen by whoever sees its contract details, hence its contract
+    row_scope = core_models.ParentScope("contract_details")
+
     contribution_plan = models.ForeignKey(ContributionPlan, db_column='ContributionPlanUUID',
                                           on_delete=models.deletion.DO_NOTHING)
     policy = models.ForeignKey(Policy, db_column='PolicyID',
@@ -133,17 +137,6 @@ class ContractContributionPlanDetails(core_models.HistoryBusinessModel):
                                      blank=True, null=True)
 
     objects = ContractContributionPlanDetailsManager()
-
-    @classmethod
-    def get_queryset(cls, queryset, user):
-        queryset = cls.filter_queryset(queryset)
-        if isinstance(user, ResolveInfo):
-            user = user.context.user
-        if settings.ROW_SECURITY and user.is_anonymous:
-            return queryset.filter(id=-1)
-        if settings.ROW_SECURITY:
-            pass
-        return queryset
 
     class Meta:
         db_table = 'tblContractContributionPlanDetails'
