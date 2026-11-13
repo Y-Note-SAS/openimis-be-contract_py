@@ -6,6 +6,7 @@ from .services import check_unique_code
 from core.gql_queries import ValidationMessageGQLType
 from core.schema import signal_mutation_module_before_mutating, OrderedDjangoFilterConnectionField
 from core.gql import legacy_row_filters
+from core import datetime
 from core.models import Validity
 from contract.models import Contract, ContractDetails, \
     ContractContributionPlanDetails, ContractMutation
@@ -129,11 +130,13 @@ def _legacy_validity(info, kwargs):
     """
     The validity is applied by Contract.get_queryset (OP-2029); the legacy arguments
     keep their meaning: dateValidFrom__Gte / dateValidTo__Lte a business validity range,
-    applyDefaultValidityFilter the rows valid now, nothing at all every row.
+    applyDefaultValidityFilter the rows not yet expired (future-dated ones included,
+    as append_validity_filter had it), nothing at all every row.
     """
     if kwargs.get('dateValidFrom__Gte') or kwargs.get('dateValidTo__Lte'):
         return legacy_row_filters(info, kwargs)
-    validity = Validity.NOW if kwargs.get('applyDefaultValidityFilter') else Validity.ALL
+    validity = Validity.between(datetime.datetime.now(), None) \
+        if kwargs.get('applyDefaultValidityFilter') else Validity.ALL
     return legacy_row_filters(info, kwargs, validity=validity)
 
 
